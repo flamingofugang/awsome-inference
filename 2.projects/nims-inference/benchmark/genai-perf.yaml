@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: genai-perf
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: genai-perf
+  template:
+    metadata:
+      labels:
+        app: genai-perf
+    spec:
+      containers:
+      - name: genai-perf
+        image: nvcr.io/nvidia/tritonserver:24.06-py3-sdk
+          # resources:
+          #   limits:
+          #     nvidia.com/gpu: 1
+          #               volumeMounts:
+        command: ["/bin/sh", "-c"]
+        args: 
+          # TODO(Joey Chou): Move this to config map and revise the benchmark script
+          - |
+            pip3 install sentencepiece
+
+            export HF_TOKEN=<YOUR_TOKEN_HERE>
+            export MODEL_NAME=meta/llama-3_1-70b-instruct
+            export TOKENIZER=meta-llama/Meta-Llama-3.1-70B-instruct
+            export OUTPUT_DIR=artifacts  # genai-perf default outputs
+            export BENCHMARK_OUTPUT_DIR_ROOT=benchmarks
+            export LOCAL_PORTNUMBER=8000
+            # export LOG_FILENAME=genai_perf.log
+
+            # Optiona 1 - Loop for concurrency
+            export input_seq_len=7000
+            export output_seq_len=1000
+            export concurrency_values=(1 2 4 8 16 32 64 128 256 512 1024 2048)
+
+            # # Optiona 2 - Loop for ISL/OSL pairs
+            # export input_seq_lens=(200 2000 200 7000 2000)
+            # export osls=(1000 200 200 1000 2000)
+            # export concurrency=250
+
+            # for concurrency in "${concurrency_values[@]}"; do
+            for i in "${!input_seq_lens[@]}"; do
+              input_seq_len=${input_seq_lens[i]}
+              output_seq_len=${osls[i]}
+              cmd="genai-perf \
+                   -m ${MODEL_NAME}  \
+                   --service-kind openai \
+                   --url openai-service:${LOCAL_PORTNUMBER} \
+                   --endpoint v1/chat/completions \
+                   --endpoint-type chat \
+                   --concurrency ${concurrency} \
+                   --num-prompts 100 \
+                   --tokenizer ${TOKENIZER} \
+                   --synthetic-input-tokens-mean $input_seq_len \
+                   --synthetic-input-tokens-stddev 0 \
+                   --streaming \
+                   --extra-inputs max_tokens:$output_seq_len \
+                   --extra-inputs ignore_eos:true \
+                   --measurement-interval 50000 \
+                   --generate-plots \
+                   -- --max-threads ${concurrency} -v"
+
+              echo "-------------------------------------------------"
+              echo "Running concurrency=${concurrency} ..."
+              echo "$cmd"
+              eval $cmd
+              # echo "$cmd" >> ${LOG_FILENAME}
+              # eval $cmd > ${LOG_FILENAME}
+
+              # Move files to the folder
+              export BENCHMARK_OUTPUT_DIR=${BENCHMARK_OUTPUT_DIR_ROOT}/isl-${input_seq_len}_osl-${output_seq_len} 
+              mkdir -p ${BENCHMARK_OUTPUT_DIR}
+              echo "Moving outputs to ${BENCHMARK_OUTPUT_DIR} ..."
+              mv ${OUTPUT_DIR}/* ${BENCHMARK_OUTPUT_DIR}
+              echo "-------------------------------------------------"
+            done
+            echo ""
+            echo "Concurrency=${concurrency_values} benchmarks finished! Outputs were saved to $BENCHMARK_OUTPUT_DIR"
+            echo "Please do 'kubectl cp <POD_NAME>:${BENCHMARK_OUTPUT_DIR} <LOCAL_DIRECTORY>' to copy benchmark data to local."
+            echo "You may stop the benchmark now."
+            sleep 360000000
+            # ls; cat my_profile_export.json; sleep 36000000000000
